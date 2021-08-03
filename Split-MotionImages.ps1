@@ -10,7 +10,7 @@
 # and consist of exiftool.exe and ffmpeg.exe
 #
 # Author: Mark Hermann
-# Last change: 27.07.2021
+# Last change: 03.08.2021
 #
 ###################################################################
 
@@ -26,6 +26,51 @@ $tagsToCopy = @("-CreateDate",         # Which tags should be copied from source
                 "-GPSLongitude",
                 "-GPSPosition")
 
+# Functions
+# ---------
+# Needed function to find trailing rubbish (see fixes section below)
+function Find-Bytes ([byte[]]$Bytes, [byte[]]$Search, [int]$Start, [Switch]$All)
+    {
+        for ($Index = $Start; $Index -le $Bytes.Length - $Search.Length ; $Index++)
+            {
+                for ($i = 0; $i -lt $Search.Length -and $Bytes[$Index + $i] -eq $Search[$i]; $i++) {}
+                if ($i -ge $Search.Length)
+                    { 
+                        $Index
+                        if (!$All)
+                            {
+                                Return
+                            }
+                    } 
+            }
+    }
+
+function Run-Command ([String]$commandName, $argumentList, [String]$stdOutPath="$tempPath\exifPS-StdOut.txt", [Switch]$wait=$false)
+    {
+        Write-Host "$commandName $argumentList" -ForegroundColor Cyan
+        New-Variable -Name process -Value $null -Scope Global -Force
+        $global:process = Start-Process -FilePath "$tempPath\$commandName" `
+                                 -ArgumentList $argumentList `
+                                 -Wait:$wait `                                 -PassThru `
+                                 -RedirectStandardError $tempPath\exifPS-StdErr.txt `
+                                 -RedirectStandardOutput $stdOutPath `
+                                 -ErrorAction Stop `
+                                 -WindowStyle Hidden
+
+        if ($wait -eq $true)
+            {
+                if ($global:process.ExitCode -ne 0)
+                    {
+                        Write-Host "      The following error has occured:" -ForegroundColor Red
+                        Get-Content $tempPath\exifPS-StdErr.txt -Encoding UTF8
+                        Read-Host "Press any key to continue or STRG+C to stop"
+                    }
+
+                 Remove-Item $tempPath\exifPS-StdErr.txt -Force
+            }
+    }
+
+
 # Extract prerequisites
 Write-Host "Extracting prerequisites, please wait..."
 Expand-Archive -Path "$PSScriptRoot\_Prerequisites.zip" -DestinationPath $tempPath -Force -ErrorAction Stop
@@ -34,8 +79,8 @@ $sourceDirectory = Read-Host -Prompt "Enter the source folder path. It will be s
 $sourceDirectory = $sourceDirectory.Replace('"','')
 
 Write-Host "Enumerating files, please wait..."
-$process = Start-Process -FilePath $tempPath\exiftool.exe `
-                         -ArgumentList @(# Check for Samsung:EmbeddedVideoFile
+Run-Command -commandName "exiftool.exe" `
+            -argumentList @(# Check for Samsung:EmbeddedVideoFile
                                          "-if",
                                          '"defined $Samsung:EmbeddedVideoFile"',
                                          "-p"
@@ -59,13 +104,9 @@ $process = Start-Process -FilePath $tempPath\exiftool.exe `
                                          "jpg",
                                          "-ext",
                                          "jpeg",
-                                         """$sourceDirectory""") `
-                         -RedirectStandardError $tempPath\exifPS-StdErr.txt `
-                         -RedirectStandardOutput $tempPath\exifPS-StdOut.txt `
-                         -PassThru `
-                         -WindowStyle Hidden
+                                         """$sourceDirectory""")
 
-while($process.HasExited -eq $false)
+while($global:process.HasExited -eq $false)
     {
         Write-Host "$(Get-Date): Still enumerating files, please wait... Files found: " -NoNewLine
         Write-Host ((Get-Content $tempPath\exifPS-StdOut.txt) | Measure-Object).Count
@@ -104,31 +145,16 @@ foreach ($file in $files)
         Write-Host "   Extracting video: " -NoNewline
         if ($file.Type -eq "Samsung.SurroundShotVideo" -or $file.Type -eq "Samsung.EmbeddedVideoFile")
             {
-                $argumentList = @("-a",
-                                  "-b",
-                                  "-$($file.Type.Replace('.',':'))",
-                                  "-charset",
-                                  "filename=latin1",
-                                  """$($fileObject.FullName)"""
-                                 )
-                Write-Host "$argumentList" -ForegroundColor Cyan
-                $process = Start-Process -FilePath $tempPath\exiftool.exe `
-                                         -ArgumentList $argumentList `
-                                         -Wait `                                         -PassThru `
-                                         -RedirectStandardError $tempPath\exifPS-StdErr.txt `
-                                         -RedirectStandardOutput $videoTempFilePath `
-                                         -ErrorAction Stop `
-                                         -WindowStyle Hidden
-
-                if ($process.ExitCode -ne 0)
-                    {
-                        Write-Host "      The following error has occured:" -ForegroundColor Red
-                        Get-Content $tempPath\exifPS-StdErr.txt -Encoding UTF8
-                        Read-Host "Press any key to stop this script"
-                        exit
-                    }
-
-                Remove-Item $tempPath\exifPS-StdErr.txt -Force
+                Run-Command -commandName "exiftool.exe" `
+                            -argumentList @("-a",
+                                            "-b",
+                                            "-$($file.Type.Replace('.',':'))",
+                                            "-charset",
+                                            "filename=latin1",
+                                            """$($fileObject.FullName)"""
+                                           ) `
+                            -stdOutPath $videoTempFilePath `
+                            -wait
             }
         elseif ($file.Type -eq "Google.MicroVideo")
             {
@@ -138,40 +164,27 @@ foreach ($file in $files)
 
         # Encode the video
         $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type).mp4"
-        $argumentList = @("-i",
-                        """$videoTempFilePath""",
-                        "-c:v",
-                        "libx265",
-                        "-x265-params",
-                        "deblock=4,4",
-                        "-crf",
-                        "35",
-                        "-preset",
-                        "slower",
-                        """$videoFilePath"""
-                       )
         Write-Host "   Encoding video: " -NoNewline
-        Write-Host "$tempPath\ffmpeg.exe $argumentList" -ForegroundColor Cyan
         Start-Process -FilePath powershell `
                       -ArgumentList @("-ExecutionPolicy",
                                       "Bypass",
                                       "Write-Host 'Setting ffmpeg priority...'; Start-Sleep 3; (Get-Process -Name ffmpeg).PriorityClass = 'Idle'; Start-Sleep 3"
                                      ) `
                       -WindowStyle Hidden
-        $process = Start-Process -FilePath "$tempPath\ffmpeg.exe" `
-                                 -ArgumentList $argumentList `                                 -Wait `
-                                 -PassThru `
-                                 -RedirectStandardError "$tempPath\ffmpeg.log" `
-                                 -ErrorAction Stop `
-                                 -WindowStyle Hidden
-
-        if ($process.ExitCode -ne 0)
-            {
-                Write-Host "      The following error has occured:" -ForegroundColor Red
-                Get-Content $tempPath\ffmpeg.log -Encoding UTF8
-                Read-Host "Press any key to stop this script"
-                exit
-            }
+        Run-Command -commandName "ffmpeg.exe" `
+                    -argumentList @("-i",
+                                    """$videoTempFilePath""",
+                                    "-c:v",
+                                    "libx265",
+                                    "-x265-params",
+                                    "deblock=4,4",
+                                    "-crf",
+                                    "35",
+                                    "-preset",
+                                    "slower",
+                                    """$videoFilePath"""
+                                   ) `
+                    -wait
 
         $sourceSize = (Get-Item $videoTempFilePath).Length
         $targetSize = (Get-Item $videoFilePath).Length
@@ -192,39 +205,87 @@ foreach ($file in $files)
                 Write-Host "   Removing video data and unnecessary EXIF info from source file: " -NoNewline
                 Write-Host "GoogleMicroVideo from offset $($file.MicroVideoOffset) to end of file" -ForegroundColor Cyan
                 $content = Get-Content $fileObject.FullName -Raw -Encoding Byte | % { $_[0 ..($_.Length-$($file.MicroVideoOffset))] }
-                $content | Set-Content $fileObject.FullName -Encoding Byte
+                Set-Content $fileObject.FullName -Encoding Byte -Value $content
             }
         Write-Host "   Removing video data and unnecessary EXIF info from source file: " -NoNewline
-                $argumentList = @("-xmp:MicroVideo=",
-                                  "-xmp:MicroVideoOffset=",
-                                  "-xmp:MicroVideoPresentationTimestampUs=",
-                                  "-xmp:MicroVideoVersion=",
-                                  "-trailer:all=",
-                                  "-charset",
-                                  "filename=latin1",
-                                  "-overwrite_original",
-                                  """$($fileObject.FullName)"""
-                                 )
-                
-                Write-Host "exiftool $argumentList" -ForegroundColor Cyan
-                $process = Start-Process -FilePath $tempPath\exiftool.exe `
-                                         -ArgumentList $argumentList `
-                                         -Wait `
-                                         -PassThru `
-                                         -RedirectStandardError $tempPath\exifPS-StdErr.txt `
-                                         -RedirectStandardOutput $tempPath\exifPS-StdOut.txt `
-                                         -ErrorAction Stop `
-                                         -WindowStyle Hidden
+        Run-Command -commandName "exiftool.exe" `
+                    -argumentList @("-xmp:MicroVideo=",
+                                    "-xmp:MicroVideoOffset=",
+                                    "-xmp:MicroVideoPresentationTimestampUs=",
+                                    "-xmp:MicroVideoVersion=",
+                                    "-trailer:all=",
+                                    "-charset",
+                                    "filename=latin1",
+                                    "-overwrite_original",
+                                    """$($fileObject.FullName)"""
+                                    ) `
+                    -wait
 
-                if ($process.ExitCode -ne 0)
+        #################################################################################################################################
+        # Fix various issues that arise within the newly created files
+        # This is primarily due to Nextcloud being unable to read those files (it wasn't able to read those before splitting them either)
+        # e.g. no EOI marker is found or sometimes its at the wrong position
+        # Searching online this seems to be a Samsung bug that hasn't been fixed in years
+
+        if ($file.Type -eq "Samsung.SurroundShotVideo")
+            {
+                # 1. First of all we will remove data rubbish that is left within the file after the actual bitstream of compressed JPEG data
+                # This is identified by a specific hex string
+                # 00 00 01 02 17 00 00 00 4D 6F 74 69 6F 6E 5F 50 61 6E 6F 72 61 6D 61 = "[Unreadable Data]Motion_Panorama"
+                $content = Get-Content $fileObject.FullName -Raw -Encoding Byte
+                $searchBytes = [BYTE[]]@(0x00, 0x00, 0x01, 0x02, 0x17, 0x00, 0x00, 0x00, 0x4D, 0x6F, 0x74, 0x69, 0x6F, 0x6E, 0x5F, 0x50, 0x61, 0x6E, 0x6F, 0x72, 0x61, 0x6D, 0x61)
+                $eoiMarker = [BYTE[]]@(0xFF, 0xD9)
+                $indexOfTrailingRubbish = Find-Bytes -Bytes $content -Search $searchBytes -All
+                if ($indexOfTrailingRubbish -ne $null)
                     {
-                        Write-Host "      The following error has occured:" -ForegroundColor Red
-                        Get-Content $tempPath\exifPS-StdErr.txt -Encoding UTF8
-                        Read-Host "Press any key to stop this script"
-                        exit
+                        $content  = $content[0..($indexOfTrailingRubbish-1)]
+                        $content += $eoiMarker
+                        Set-Content $fileObject.FullName -Encoding Byte -Value $content
                     }
+                # End of 1. fix
+
+                # 2. Now we will remove broken IFD1 tags as Samsung doesn't follow JPEG specifications
+                Write-Host "   Removing broken Samsung IFD1 tags from target file: " -NoNewline
+                Run-Command -commandName "exiftool.exe" `
+                            -argumentList @("-ifd1:all="
+                                          "-overwrite_original",
+                                          "-charset",
+                                          "filename=latin1",
+                                          """$($fileObject.FullName)"""
+                                          ) `
+                            -wait
+            }
+        # End of 2. fix
+
+        # 3. Now we will fix possible remaining issues with the EXIF data
+        # -ExifVersion=0232 upgrades to EXIF version 2.32
+        # Needed as Samsung writes LensModel, but uses wrong EXIF version...
+        Write-Host "   Fixing possible EXIF issues within target file: " -NoNewline
+        Run-Command -commandName "exiftool.exe" `
+                    -argumentList ("-all=",
+                                   "-TagsFromFile",
+                                   "@",
+                                   "-all:all",
+                                   "-unsafe",
+                                   "-icc_profile",
+                                   "-execute",
+                                   "-ExifVersion=0232",
+                                   "-execute",
+                                   "-common_args",
+                                   "-overwrite_original",
+                                   "-charset",
+                                   "filename=latin1",
+                                   """$($fileObject.FullName)"""
+                                   ) `
+                    -wait
+        # Enf of 3. fix
+
+
+        # End of fixes
+        #################################################################################################################################
 
         # Copy EXIF tags over
+        Write-Host "   Copying EXIF tags from source to target video file: " -NoNewline
         $argumentList = @("-TagsFromFile",
                           """$($fileObject.FullName)""",
                           "-charset",
@@ -235,23 +296,30 @@ foreach ($file in $files)
                           )
         $argumentList += $tagsToCopy
         $argumentList += @("""$videoFilePath""")
-        Write-Host "   Copying EXIF tags from source to target file: " -NoNewline
-        Write-Host "$argumentList" -ForegroundColor Cyan
-        $process = Start-Process -FilePath $tempPath\exiftool.exe `
-                                 -ArgumentList $argumentList `
-                                 -Wait `
-                                 -PassThru `
-                                 -RedirectStandardError $tempPath\exifPS-StdErr.txt `
-                                 -RedirectStandardOutput $tempPath\exifPS-StdOut.txt `
-                                 -ErrorAction Stop `
-                                 -WindowStyle Hidden
+        
+        Run-Command -commandName "exiftool.exe" `
+                    -argumentList $argumentList `
+                    -wait
 
-        if ($process.ExitCode -ne 0)
+        # Final JPEG verification
+        Write-Host "   Verifying newly generated JPG: " -NoNewline
+        Run-Command -commandName "exiftool.exe" `
+                    -argumentList ("-validate",
+                                   "-warning",
+                                   "-a",
+                                   """$($fileObject.FullName)""",
+                                   "-charset",
+                                   "filename=latin1"
+                                    ) `
+                    -wait
+        
+        $stdOut = Get-Content $tempPath\exifPS-StdOut.txt -Encoding UTF8
+        if ($stdOut -ne "Validate                        : OK")
             {
-                Write-Host "      The following error has occured:" -ForegroundColor Red
+                Write-Host "      The following errors were found or have occured:" -ForegroundColor Red
                 Get-Content $tempPath\exifPS-StdErr.txt -Encoding UTF8
-                Read-Host "Press any key to stop this script"
-                exit
+                $stdOut
+                Read-Host "Press any key to continue or STRG+C to stop this script"
             }
 
         $i++
