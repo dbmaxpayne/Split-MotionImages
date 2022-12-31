@@ -10,7 +10,8 @@
 # and consist of exiftool.exe and ffmpeg.exe
 #
 # Author: Mark Hermann
-# Last change: 03.08.2021
+# Last change: 31.12.2022
+# 30.12.2022: Added functionality for newer Google Motion Photos
 #
 ###################################################################
 
@@ -25,6 +26,8 @@ $tagsToCopy = @("-CreateDate",         # Which tags should be copied from source
                 "-GPSLatitude",
                 "-GPSLongitude",
                 "-GPSPosition")
+$exifToolPath = "D:\Nextcloud\Eigene Dateien\Programmieren & Basteln\Exiftool Skripte\exiftool.exe"
+$ffmpegPath   = "D:\Nextcloud\Eigene Dateien\Programmieren & Basteln\FFmpeg & Skripte\FFQueue_1_7_58\ffmpeg.exe"
 
 # Functions
 # ---------
@@ -47,9 +50,10 @@ function Find-Bytes ([byte[]]$Bytes, [byte[]]$Search, [int]$Start, [Switch]$All)
 
 function Run-Command ([String]$commandName, $argumentList, [String]$stdOutPath="$tempPath\exifPS-StdOut.txt", [Switch]$wait=$false)
     {
+        $commandName = """$commandName"""
         Write-Host "$commandName $argumentList" -ForegroundColor Cyan
         New-Variable -Name process -Value $null -Scope Global -Force
-        $global:process = Start-Process -FilePath "$tempPath\$commandName" `
+        $global:process = Start-Process -FilePath "$commandName" `
                                  -ArgumentList $argumentList `
                                  -Wait:$wait `                                 -PassThru `
                                  -RedirectStandardError $tempPath\exifPS-StdErr.txt `
@@ -70,16 +74,20 @@ function Run-Command ([String]$commandName, $argumentList, [String]$stdOutPath="
             }
     }
 
-
 # Extract prerequisites
-Write-Host "Extracting prerequisites, please wait..."
-Expand-Archive -Path "$PSScriptRoot\_Prerequisites.zip" -DestinationPath $tempPath -Force -ErrorAction Stop
+#Write-Host "Extracting prerequisites, please wait..."
+#Expand-Archive -Path "$PSScriptRoot\_Prerequisites.zip" -DestinationPath $tempPath -Force -ErrorAction Stop
+
+if (-Not (Test-Path $tempPath))
+    {
+        New-Item $tempPath -ItemType Directory | Out-Null
+    }
 
 $sourceDirectory = Read-Host -Prompt "Enter the source folder path. It will be scanned for all JPEG files"
 $sourceDirectory = $sourceDirectory.Replace('"','')
 
 Write-Host "Enumerating files, please wait..."
-Run-Command -commandName "exiftool.exe" `
+Run-Command -commandName $exifToolPath `
             -argumentList @(# Check for Samsung:EmbeddedVideoFile
                                          "-if",
                                          '"defined $Samsung:EmbeddedVideoFile"',
@@ -92,11 +100,17 @@ Run-Command -commandName "exiftool.exe" `
                                          "-p",
                                          '"Samsung.SurroundShotVideo|null|$directory\$filename"',
                                          "-execute"
-                                         # Check for Google Micro Video Offset
+                                         # Check for Google Micro Video Offset (old Motion Photos)
                                          "-if",
                                          '"defined $xmp:MicroVideoOffset"',
                                          "-p",
                                          '"Google.MicroVideo|$MicroVideoOffset|$directory\$filename"',
+                                         "-execute",
+                                         # Check for Google Micro Video Offset (new Motion Photos)
+                                         "-if",
+                                         '"defined $xmp:MotionPhotoVersion"',
+                                         "-p",
+                                         '"Google.MotionVideo|null|$directory\$filename"',
                                          # Common arguments
                                          "-common_args"
                                          "-r",
@@ -145,7 +159,7 @@ foreach ($file in $files)
         Write-Host "   Extracting video: " -NoNewline
         if ($file.Type -eq "Samsung.SurroundShotVideo" -or $file.Type -eq "Samsung.EmbeddedVideoFile")
             {
-                Run-Command -commandName "exiftool.exe" `
+                Run-Command -commandName $exifToolPath `
                             -argumentList @("-a",
                                             "-b",
                                             "-$($file.Type.Replace('.',':'))",
@@ -161,6 +175,17 @@ foreach ($file in $files)
                 Write-Host "GoogleMicroVideo from offset $($file.MicroVideoOffset)" -ForegroundColor Cyan
                 Get-Content $fileObject.FullName -Raw -Encoding Byte | % { $_[($_.Length-$($file.MicroVideoOffset)) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
             }
+        elseif ($file.Type -eq "Google.MotionVideo")
+            {
+                $videoTempFilePath
+                $searchBytes = @([byte]0x00,0x00,0x00,0x1C,0X66,0x74,0x79,0x70,0x69,0x73,0x6F,0x6D) # [...]ftypisom
+                $fileBytes = Get-Content $fileObject.FullName -Raw -Encoding Byte
+                $googleMotionPhotoOffset = Find-Bytes -Bytes $fileBytes -Search $searchBytes
+                Write-Host "Extracting Google.MotionVideo from offset $googleMotionPhotoOffset" -ForegroundColor Cyan -NoNewline
+                #$fileBytes | % { $_[($_.Length-$googleMotionPhotoOffset) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
+                $fileBytes[$googleMotionPhotoOffset ..($fileBytes.Length-1)] | Set-Content $videoTempFilePath -Encoding Byte
+                Write-Host " done"
+            }
 
         # Encode the video
         $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type).mp4"
@@ -171,17 +196,26 @@ foreach ($file in $files)
                                       "Write-Host 'Setting ffmpeg priority...'; Start-Sleep 3; (Get-Process -Name ffmpeg).PriorityClass = 'Idle'; Start-Sleep 3"
                                      ) `
                       -WindowStyle Hidden
-        Run-Command -commandName "ffmpeg.exe" `
+        Run-Command -commandName $ffmpegPath `
                     -argumentList @("-i",
                                     """$videoTempFilePath""",
                                     "-c:v",
-                                    "libx265",
-                                    "-x265-params",
-                                    "deblock=4,4",
+                                    #"libx265", #HEVC
+                                    "libsvtav1"
+                                    #"-x265-params", #HEVC
+                                    #"deblock=4,4", #HEVC
                                     "-crf",
                                     "35",
-                                    "-preset",
-                                    "slower",
+                                    #"-preset", #HEVC
+                                    "-preset:v",
+                                    #"slower", #HEVC
+                                    "4",
+                                    "-pix_fmt",
+                                    "yuv420p10le",
+                                    "-svtav1-params",
+                                    "input-depth=10:keyint=10s",
+                                    "-map",
+                                    "0:v:0",
                                     """$videoFilePath"""
                                    ) `
                     -wait
@@ -208,11 +242,14 @@ foreach ($file in $files)
                 Set-Content $fileObject.FullName -Encoding Byte -Value $content
             }
         Write-Host "   Removing video data and unnecessary EXIF info from source file: " -NoNewline
-        Run-Command -commandName "exiftool.exe" `
+        Run-Command -commandName $exifToolPath `
                     -argumentList @("-xmp:MicroVideo=",
                                     "-xmp:MicroVideoOffset=",
                                     "-xmp:MicroVideoPresentationTimestampUs=",
                                     "-xmp:MicroVideoVersion=",
+                                    "-xmp:MotionPhoto=",
+                                    "-xmp:MotionPhotoVersion=",
+                                    "-xmp:MotionPhotoPresentationTimestampUs=",
                                     "-trailer:all=",
                                     "-charset",
                                     "filename=latin1",
@@ -246,7 +283,7 @@ foreach ($file in $files)
 
                 # 2. Now we will remove broken IFD1 tags as Samsung doesn't follow JPEG specifications
                 Write-Host "   Removing broken Samsung IFD1 tags from target file: " -NoNewline
-                Run-Command -commandName "exiftool.exe" `
+                Run-Command -commandName $exifToolPath `
                             -argumentList @("-ifd1:all="
                                           "-overwrite_original",
                                           "-charset",
@@ -261,7 +298,7 @@ foreach ($file in $files)
         # -ExifVersion=0232 upgrades to EXIF version 2.32
         # Needed as Samsung writes LensModel, but uses wrong EXIF version...
         Write-Host "   Fixing possible EXIF issues within target file: " -NoNewline
-        Run-Command -commandName "exiftool.exe" `
+        Run-Command -commandName $exifToolPath `
                     -argumentList ("-all=",
                                    "-TagsFromFile",
                                    "@",
@@ -297,13 +334,13 @@ foreach ($file in $files)
         $argumentList += $tagsToCopy
         $argumentList += @("""$videoFilePath""")
         
-        Run-Command -commandName "exiftool.exe" `
+        Run-Command -commandName $exifToolPath `
                     -argumentList $argumentList `
                     -wait
 
         # Final JPEG verification
         Write-Host "   Verifying newly generated JPG: " -NoNewline
-        Run-Command -commandName "exiftool.exe" `
+        Run-Command -commandName $exifToolPath `
                     -argumentList ("-validate",
                                    "-warning",
                                    "-a",
