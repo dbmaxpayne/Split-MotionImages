@@ -29,10 +29,11 @@ $tagsToCopy = @("-CreateDate",         # Which tags should be copied from source
                 "-GPSPosition")
 $exifToolPath = "D:\Nextcloud\Eigene Dateien\Programmieren & Basteln\Exiftool Skripte\exiftool.exe"
 $ffmpegPath   = "D:\Nextcloud\Eigene Dateien\Programmieren & Basteln\FFmpeg & Skripte\FFQueue_1_7_58\ffmpeg.exe"
-$ffmpegBoomerang = @("-filter_complex",
+$ffmpegBoomerang   = @("-filter_complex",
                      """[0:v:0]reverse,fifo[r];[0:v:0][r] concat=n=2:v=1 [v]""",
                      "-map",
                      """[v]""")
+$ffmpegNoBoomerang = @("-map", "0:v:0")
 
 # Functions
 # ---------
@@ -88,10 +89,14 @@ if (-Not (Test-Path $tempPath))
         New-Item $tempPath -ItemType Directory | Out-Null
     }
 
-$createBoomerang = Read-Host -Prompt "Would you like to create boomerang videos? y/n"
+$createBoomerang = Read-Host -Prompt "Would you like to create additional boomerang (looped) videos? y/n"
 if ($createBoomerang -ne "yes" -and $createBoomerang -ne "y")
     {
-        $ffmpegBoomerang = @("-map", "0:v:0")
+        $createBoomerang = $false
+    }
+else
+    {
+        $createBoomerang = $true
     }
 
 $sourceDirectory = Read-Host -Prompt "Enter the source folder path. It will be scanned for all JPEG files"
@@ -199,8 +204,42 @@ foreach ($file in $files)
             }
 
         # Encode the video
+        if ($createBoomerang)
+            {
+                $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type)-Boomerang.mp4"
+                Write-Host "   Encoding boomerang video: " -NoNewline
+                Start-Process -FilePath powershell `
+                      -ArgumentList @("-ExecutionPolicy",
+                                      "Bypass",
+                                      "Write-Host 'Setting ffmpeg priority...'; Start-Sleep 3; (Get-Process -Name ffmpeg).PriorityClass = 'Idle'; Start-Sleep 3"
+                                     ) `
+                      -WindowStyle Hidden
+                Run-Command -commandName $ffmpegPath `
+                            -argumentList (@("-i",
+                                            """$videoTempFilePath""",
+                                            "-c:v",
+                                            #"libx265", #HEVC
+                                            "libsvtav1"
+                                            #"-x265-params", #HEVC
+                                            #"deblock=4,4", #HEVC
+                                            "-crf",
+                                            "28",
+                                            #"-preset", #HEVC
+                                            "-preset:v",
+                                            #"slower", #HEVC
+                                            "4",
+                                            "-pix_fmt",
+                                            "yuv420p10le",
+                                            "-svtav1-params",
+                                            "input-depth=10:keyint=10s"
+                                            ) + $ffmpegBoomerang `
+                                            + @("""$videoFilePath"""
+                                           )) `
+                            -wait
+            }
+
         $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type).mp4"
-        Write-Host "   Encoding video: " -NoNewline
+        Write-Host "   Encoding normal video: " -NoNewline
         Start-Process -FilePath powershell `
                       -ArgumentList @("-ExecutionPolicy",
                                       "Bypass",
@@ -225,7 +264,7 @@ foreach ($file in $files)
                                     "yuv420p10le",
                                     "-svtav1-params",
                                     "input-depth=10:keyint=10s"
-                                    ) + $ffmpegBoomerang `
+                                    ) + $ffmpegNoBoomerang `
                                     + @("""$videoFilePath"""
                                    )) `
                     -wait
