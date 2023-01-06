@@ -13,6 +13,7 @@
 # 01.01.2023: Changed encoder to AV1
 # 06.01.2023: Added functionality to create boomerang videos that can be looped
 #             Changed CRF from 35 to 28
+#             Changed FPS mode of ffmpeg to passthrough as auto sometimes created 120fps videos even if the original's VFR was only like 25.40
 #
 ###################################################################
 
@@ -233,7 +234,9 @@ foreach ($file in $files)
                                             "-svtav1-params",
                                             "input-depth=10:keyint=10s"
                                             ) + $ffmpegBoomerang `
-                                            + @("""$videoFilePath"""
+                                            + @("-fps_mode",
+                                                "passthrough",
+                                                """$videoFilePath"""
                                            )) `
                             -wait
             }
@@ -265,7 +268,9 @@ foreach ($file in $files)
                                     "-svtav1-params",
                                     "input-depth=10:keyint=10s"
                                     ) + $ffmpegNoBoomerang `
-                                    + @("""$videoFilePath"""
+                                    + @("-fps_mode",
+                                        "passthrough",
+                                        """$videoFilePath"""
                                    )) `
                     -wait
 
