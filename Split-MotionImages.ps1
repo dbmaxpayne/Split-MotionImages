@@ -1,17 +1,18 @@
 ﻿###################################################################
 #
 # Script to split video and image from various motion photo formats
-# e.g. Samsung Surround Shot Video, Google MVIMG
+# e.g. Samsung Surround Shot Video, Google MVIMG, Google Motion Photo
 #
 # - Tested with exiftool 12.28
 # - Tested with ffmpeg 4.4-full_build-www.gyan.dev
 #
-# _Prerequisites.zip must be present in the script's root folder
-# and consist of exiftool.exe and ffmpeg.exe
 #
 # Author: Mark Hermann
 # Last change: 31.12.2022
 # 30.12.2022: Added functionality for newer Google Motion Photos
+# 01.01.2023: Changed encoder to AV1
+# 06.01.2023: Added functionality to create boomerang videos that can be looped
+#             Changed CRF from 35 to 28
 #
 ###################################################################
 
@@ -28,6 +29,10 @@ $tagsToCopy = @("-CreateDate",         # Which tags should be copied from source
                 "-GPSPosition")
 $exifToolPath = "D:\Nextcloud\Eigene Dateien\Programmieren & Basteln\Exiftool Skripte\exiftool.exe"
 $ffmpegPath   = "D:\Nextcloud\Eigene Dateien\Programmieren & Basteln\FFmpeg & Skripte\FFQueue_1_7_58\ffmpeg.exe"
+$ffmpegBoomerang = @("-filter_complex",
+                     """[0:v:0]reverse,fifo[r];[0:v:0][r] concat=n=2:v=1 [v]""",
+                     "-map",
+                     """[v]""")
 
 # Functions
 # ---------
@@ -81,6 +86,12 @@ function Run-Command ([String]$commandName, $argumentList, [String]$stdOutPath="
 if (-Not (Test-Path $tempPath))
     {
         New-Item $tempPath -ItemType Directory | Out-Null
+    }
+
+$createBoomerang = Read-Host -Prompt "Would you like to create boomerang videos? y/n"
+if ($createBoomerang -ne "yes" -and $createBoomerang -ne "y")
+    {
+        $ffmpegBoomerang = @("-map", "0:v:0")
     }
 
 $sourceDirectory = Read-Host -Prompt "Enter the source folder path. It will be scanned for all JPEG files"
@@ -197,7 +208,7 @@ foreach ($file in $files)
                                      ) `
                       -WindowStyle Hidden
         Run-Command -commandName $ffmpegPath `
-                    -argumentList @("-i",
+                    -argumentList (@("-i",
                                     """$videoTempFilePath""",
                                     "-c:v",
                                     #"libx265", #HEVC
@@ -205,7 +216,7 @@ foreach ($file in $files)
                                     #"-x265-params", #HEVC
                                     #"deblock=4,4", #HEVC
                                     "-crf",
-                                    "35",
+                                    "28",
                                     #"-preset", #HEVC
                                     "-preset:v",
                                     #"slower", #HEVC
@@ -213,11 +224,10 @@ foreach ($file in $files)
                                     "-pix_fmt",
                                     "yuv420p10le",
                                     "-svtav1-params",
-                                    "input-depth=10:keyint=10s",
-                                    "-map",
-                                    "0:v:0",
-                                    """$videoFilePath"""
-                                   ) `
+                                    "input-depth=10:keyint=10s"
+                                    ) + $ffmpegBoomerang `
+                                    + @("""$videoFilePath"""
+                                   )) `
                     -wait
 
         $sourceSize = (Get-Item $videoTempFilePath).Length
