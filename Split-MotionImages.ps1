@@ -8,17 +8,22 @@
 #
 #
 # Author: Mark Hermann
-# Last change: 31.12.2022
+# Last change: 24.01.2022
 # 30.12.2022: Added functionality for newer Google Motion Photos
 # 01.01.2023: Changed encoder to AV1
 # 06.01.2023: Added functionality to create boomerang videos that can be looped
 #             Changed CRF from 35 to 28
 #             Changed FPS mode of ffmpeg to passthrough as auto sometimes created 120fps videos even if the original's VFR was only like 25.40
+# 24.01.2023: Added maxrate to the encoder as it doesn't make sense to create videos larger than the original. I usually want to save space with a more poewerful encoder / settings
+# 10.08.2023: Added option to only remove the video without encoding anything
 #
 ###################################################################
 
 # Variables
 # ---------
+$minimumSavedSpaceInPercent = 30 # How much space shall be saved by the encode of the normal videos
+$minimumSavedSpaceInPercentMargin = 5 # How much is the encoder allowed to overshoot the target bitrate in percent
+$minimumSavedSpaceMultiplier = 1-($minimumSavedSpaceInPercent/100)
 $tempPath = "$($env:TEMP)\$($MyInvocation.MyCommand.Name)"
 $tagsToCopy = @("-CreateDate",         # Which tags should be copied from source JPG to video file
                 "-DateTimeOriginal",
@@ -28,8 +33,9 @@ $tagsToCopy = @("-CreateDate",         # Which tags should be copied from source
                 "-GPSLatitude",
                 "-GPSLongitude",
                 "-GPSPosition")
-$exifToolPath = "D:\Nextcloud\Eigene Dateien\Programmieren & Basteln\Exiftool Skripte\exiftool.exe"
-$ffmpegPath   = "D:\Nextcloud\Eigene Dateien\Programmieren & Basteln\FFmpeg & Skripte\FFQueue_1_7_58\ffmpeg.exe"
+$exifToolPath = "$PSScriptRoot\exiftool.exe"
+$ffmpegPath   = ("$PSScriptRoot\..\FFmpeg & Skripte\FFQueue_1_7_58\ffmpeg.exe" | Resolve-Path).Path
+$ffprobePath   = ("$PSScriptRoot\..\FFmpeg & Skripte\FFQueue_1_7_58\ffprobe.exe" | Resolve-Path).Path
 $ffmpegBoomerang   = @("-filter_complex",
                      """[0:v:0]reverse,fifo[r];[0:v:0][r] concat=n=2:v=1 [v]""",
                      "-map",
@@ -90,14 +96,24 @@ if (-Not (Test-Path $tempPath))
         New-Item $tempPath -ItemType Directory | Out-Null
     }
 
-$createBoomerang = Read-Host -Prompt "Would you like to create additional boomerang (looped) videos? y/n"
-if ($createBoomerang -ne "yes" -and $createBoomerang -ne "y")
+$createVideos = Read-Host -Prompt "Would you like to create videos at all? y=yes, r=Remove Only"
+if ($createVideos -eq "r" -or $createVideos -eq "remove")
     {
-        $createBoomerang = $false
+        $createVideos = $false
     }
 else
     {
-        $createBoomerang = $true
+        $createVideos = $true
+
+        $createBoomerang = Read-Host -Prompt "Would you like to create additional boomerang (looped) videos? y/n"
+        if ($createBoomerang -ne "yes" -and $createBoomerang -ne "y")
+            {
+                $createBoomerang = $false
+            }
+        else
+            {
+                $createBoomerang = $true
+            }
     }
 
 $sourceDirectory = Read-Host -Prompt "Enter the source folder path. It will be scanned for all JPEG files"
@@ -171,42 +187,57 @@ foreach ($file in $files)
         $backupFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).SplitOriginal$($fileObject.Extension)"
         Copy-Item $fileObject -Destination $backupFilePath -ErrorAction Stop -WarningAction Stop
 
-        # Extract the video
-        $videoTempFilePath = "$tempPath\$($fileObject.BaseName).$($file.Type)Temp.mp4"
-        Write-Host "   Extracting video: " -NoNewline
-        if ($file.Type -eq "Samsung.SurroundShotVideo" -or $file.Type -eq "Samsung.EmbeddedVideoFile")
+        if ($createVideos)
             {
-                Run-Command -commandName $exifToolPath `
-                            -argumentList @("-a",
-                                            "-b",
-                                            "-$($file.Type.Replace('.',':'))",
-                                            "-charset",
-                                            "filename=latin1",
-                                            """$($fileObject.FullName)"""
-                                           ) `
-                            -stdOutPath $videoTempFilePath `
-                            -wait
-            }
-        elseif ($file.Type -eq "Google.MicroVideo")
-            {
-                Write-Host "GoogleMicroVideo from offset $($file.MicroVideoOffset)" -ForegroundColor Cyan
-                Get-Content $fileObject.FullName -Raw -Encoding Byte | % { $_[($_.Length-$($file.MicroVideoOffset)) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
-            }
-        elseif ($file.Type -eq "Google.MotionVideo")
-            {
-                $videoTempFilePath
-                $searchBytes = @([byte]0x00,0x00,0x00,0x1C,0X66,0x74,0x79,0x70,0x69,0x73,0x6F,0x6D) # [...]ftypisom
-                $fileBytes = Get-Content $fileObject.FullName -Raw -Encoding Byte
-                $googleMotionPhotoOffset = Find-Bytes -Bytes $fileBytes -Search $searchBytes
-                Write-Host "Extracting Google.MotionVideo from offset $googleMotionPhotoOffset" -ForegroundColor Cyan -NoNewline
-                #$fileBytes | % { $_[($_.Length-$googleMotionPhotoOffset) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
-                $fileBytes[$googleMotionPhotoOffset ..($fileBytes.Length-1)] | Set-Content $videoTempFilePath -Encoding Byte
-                Write-Host " done"
-            }
+                # Extract the video
+                $videoTempFilePath = "$tempPath\$($fileObject.BaseName).$($file.Type)Temp.mp4"
+                Write-Host "   Extracting video: " -NoNewline
+                if ($file.Type -eq "Samsung.SurroundShotVideo" -or $file.Type -eq "Samsung.EmbeddedVideoFile")
+                    {
+                        Run-Command -commandName $exifToolPath `
+                                    -argumentList @("-a",
+                                                    "-b",
+                                                    "-$($file.Type.Replace('.',':'))",
+                                                    "-charset",
+                                                    "filename=latin1",
+                                                    """$($fileObject.FullName)"""
+                                                   ) `
+                                    -stdOutPath $videoTempFilePath `
+                                    -wait
+                    }
+                elseif ($file.Type -eq "Google.MicroVideo")
+                    {
+                        Write-Host "GoogleMicroVideo from offset $($file.MicroVideoOffset)" -ForegroundColor Cyan
+                        Get-Content $fileObject.FullName -Raw -Encoding Byte | % { $_[($_.Length-$($file.MicroVideoOffset)) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
+                    }
+                elseif ($file.Type -eq "Google.MotionVideo")
+                    {
+                        $videoTempFilePath
+                        $searchBytes = @([byte]0x00,0x00,0x00,0x1C,0X66,0x74,0x79,0x70,0x69,0x73,0x6F,0x6D) # [...]ftypisom
+                        $fileBytes = Get-Content $fileObject.FullName -Raw -Encoding Byte
+                        $googleMotionPhotoOffset = Find-Bytes -Bytes $fileBytes -Search $searchBytes
+                        Write-Host "Extracting Google.MotionVideo from offset $googleMotionPhotoOffset" -ForegroundColor Cyan -NoNewline
+                        #$fileBytes | % { $_[($_.Length-$googleMotionPhotoOffset) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
+                        $fileBytes[$googleMotionPhotoOffset ..($fileBytes.Length-1)] | Set-Content $videoTempFilePath -Encoding Byte
+                        Write-Host " done"
+                    }
 
-        # Encode the video
-        if ($createBoomerang)
-            {
+                # Get source video bitrate
+                Write-Host "   Getting source bitrate: " -NoNewline
+                Run-Command -commandName $ffprobePath `
+                            -argumentList @("-i",
+                                            """$videoTempFilePath""",
+                                            "-hide_banner",
+                                            "-print_format", "flat",
+                                            "-show_streams",
+                                            "-select_streams", "v:0") `
+                            -wait
+                [int]$sourceBitrate = ((Get-Content "$tempPath\exifPS-StdOut.txt" | where{$_ -like "streams.stream.0.bit_rate*"}) -split "=")[1] -replace '"',''
+                Write-Host "   Source bitrate: $sourceBitrate"
+
+                # Encode the video
+                if ($createBoomerang)
+                                                                                                                                                                                                                                                                                                            {
                 $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type)-Boomerang.mp4"
                 Write-Host "   Encoding boomerang video: " -NoNewline
                 Start-Process -FilePath powershell `
@@ -232,7 +263,9 @@ foreach ($file in $files)
                                             "-pix_fmt",
                                             "yuv420p10le",
                                             "-svtav1-params",
-                                            "input-depth=10:keyint=10s"
+                                            "input-depth=10:keyint=10s",
+                                            "-maxrate:v",
+                                            "$([math]::Round($sourceBitrate*$minimumSavedSpaceMultiplier))"
                                             ) + $ffmpegBoomerang `
                                             + @("-fps_mode",
                                                 "passthrough",
@@ -241,61 +274,64 @@ foreach ($file in $files)
                             -wait
             }
 
-        $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type).mp4"
-        Write-Host "   Encoding normal video: " -NoNewline
-        Start-Process -FilePath powershell `
-                      -ArgumentList @("-ExecutionPolicy",
-                                      "Bypass",
-                                      "Write-Host 'Setting ffmpeg priority...'; Start-Sleep 3; (Get-Process -Name ffmpeg).PriorityClass = 'Idle'; Start-Sleep 3"
-                                     ) `
-                      -WindowStyle Hidden
-        Run-Command -commandName $ffmpegPath `
-                    -argumentList (@("-i",
-                                    """$videoTempFilePath""",
-                                    "-c:v",
-                                    #"libx265", #HEVC
-                                    "libsvtav1"
-                                    #"-x265-params", #HEVC
-                                    #"deblock=4,4", #HEVC
-                                    "-crf",
-                                    "28",
-                                    #"-preset", #HEVC
-                                    "-preset:v",
-                                    #"slower", #HEVC
-                                    "4",
-                                    "-pix_fmt",
-                                    "yuv420p10le",
-                                    "-svtav1-params",
-                                    "input-depth=10:keyint=10s"
-                                    ) + $ffmpegNoBoomerang `
-                                    + @("-fps_mode",
-                                        "passthrough",
-                                        """$videoFilePath"""
-                                   )) `
-                    -wait
+                $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type).mp4"
+                Write-Host "   Encoding normal video: " -NoNewline
+                Start-Process -FilePath powershell `
+                              -ArgumentList @("-ExecutionPolicy",
+                                              "Bypass",
+                                              "Write-Host 'Setting ffmpeg priority...'; Start-Sleep 3; (Get-Process -Name ffmpeg).PriorityClass = 'Idle'; Start-Sleep 3"
+                                             ) `
+                              -WindowStyle Hidden
+                Run-Command -commandName $ffmpegPath `
+                            -argumentList (@("-i",
+                                            """$videoTempFilePath""",
+                                            "-c:v",
+                                            #"libx265", #HEVC
+                                            "libsvtav1"
+                                            #"-x265-params", #HEVC
+                                            #"deblock=4,4", #HEVC
+                                            "-crf",
+                                            "28",
+                                            #"-preset", #HEVC
+                                            "-preset:v",
+                                            #"slower", #HEVC
+                                            "4",
+                                            "-pix_fmt",
+                                            "yuv420p10le",
+                                            "-svtav1-params",
+                                            "input-depth=10:keyint=10s",
+                                            "-maxrate:v",
+                                            "$([math]::Round($sourceBitrate*$minimumSavedSpaceMultiplier))"
+                                            ) + $ffmpegNoBoomerang `
+                                            + @("-fps_mode",
+                                                "passthrough",
+                                                """$videoFilePath"""
+                                           )) `
+                            -wait
 
-        $sourceSize = (Get-Item $videoTempFilePath).Length
-        $targetSize = (Get-Item $videoFilePath).Length
-        $spaceSaved = $sourceSize - $targetSize
-        if ((100/$sourceSize*$targetSize) -gt 70)
-            {
-                Write-Host "   Space saved $([math]::Round($spaceSaved/ 1024 / 1024, 2))mb is less than 30%" -ForegroundColor Red
-                Read-Host "Press Enter to continue"
-            }
-        else
-            {
-                Write-Host "   Space saved $([math]::Round($spaceSaved/ 1024 / 1024, 2))mb" -ForegroundColor Green
-            }
+                    $sourceSize = (Get-Item $videoTempFilePath).Length
+                    $targetSize = (Get-Item $videoFilePath).Length
+                    $spaceSaved = $sourceSize - $targetSize
+                    $spaceSavedInPercent = [math]::Round((100 - (100*$targetSize/$sourceSize)),2)
+                    if ($spaceSavedInPercent -lt ($minimumSavedSpaceInPercent - $minimumSavedSpaceInPercentMargin))
+                        {
+                            Write-Host "   Space saved $([math]::Round($spaceSaved/ 1024 / 1024, 2))mb ($spaceSavedInPercent%) is less than $minimumSavedSpaceInPercent%" -ForegroundColor Red
+                            Read-Host "Press Enter to continue"
+                        }
+                    else
+                        {
+                            Write-Host "   Space saved $([math]::Round($spaceSaved/ 1024 / 1024, 2))mb ($spaceSavedInPercent%)" -ForegroundColor Green
+                        }
+                }
 
         # Remove the video bitstream from the original
+        Write-Host "   Removing video data and unnecessary EXIF info from source file: " -NoNewline
         if ($file.Type -eq "Google.MicroVideo")
             {
-                Write-Host "   Removing video data and unnecessary EXIF info from source file: " -NoNewline
                 Write-Host "GoogleMicroVideo from offset $($file.MicroVideoOffset) to end of file" -ForegroundColor Cyan
                 $content = Get-Content $fileObject.FullName -Raw -Encoding Byte | % { $_[0 ..($_.Length-$($file.MicroVideoOffset))] }
                 Set-Content $fileObject.FullName -Encoding Byte -Value $content
             }
-        Write-Host "   Removing video data and unnecessary EXIF info from source file: " -NoNewline
         Run-Command -commandName $exifToolPath `
                     -argumentList @("-xmp:MicroVideo=",
                                     "-xmp:MicroVideoOffset=",
@@ -376,21 +412,44 @@ foreach ($file in $files)
         #################################################################################################################################
 
         # Copy EXIF tags over
-        Write-Host "   Copying EXIF tags from source to target video file: " -NoNewline
-        $argumentList = @("-TagsFromFile",
-                          """$($fileObject.FullName)""",
-                          "-charset",
-                          "filename=latin1",
-                          "-overwrite_original"
-                          "-api",
-                          "QuickTimeUTC"
-                          )
-        $argumentList += $tagsToCopy
-        $argumentList += @("""$videoFilePath""")
+        if ($createVideos)
+            {
+                if ($createBoomerang)
+                    {
+                        $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type)-Boomerang.mp4"
+                        Write-Host "   Copying EXIF tags from source to boomerang target video file: " -NoNewline
+                        $argumentList = @("-TagsFromFile",
+                                          """$($fileObject.FullName)""",
+                                          "-charset",
+                                          "filename=latin1",
+                                          "-overwrite_original"
+                                          "-api",
+                                          "QuickTimeUTC"
+                                          )
+                        $argumentList += $tagsToCopy
+                        $argumentList += @("""$videoFilePath""")
         
-        Run-Command -commandName $exifToolPath `
-                    -argumentList $argumentList `
-                    -wait
+                        Run-Command -commandName $exifToolPath `
+                                    -argumentList $argumentList `
+                                    -wait
+                    }
+
+                Write-Host "   Copying EXIF tags from source to normal target video file: " -NoNewline
+                $argumentList = @("-TagsFromFile",
+                                  """$($fileObject.FullName)""",
+                                  "-charset",
+                                  "filename=latin1",
+                                  "-overwrite_original"
+                                  "-api",
+                                  "QuickTimeUTC"
+                                  )
+                $argumentList += $tagsToCopy
+                $argumentList += @("""$videoFilePath""")
+        
+                Run-Command -commandName $exifToolPath `
+                            -argumentList $argumentList `
+                            -wait
+            }
 
         # Final JPEG verification
         Write-Host "   Verifying newly generated JPG: " -NoNewline
