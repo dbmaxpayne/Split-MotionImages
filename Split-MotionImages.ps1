@@ -1,4 +1,4 @@
-﻿###################################################################
+###################################################################
 #
 # Script to split video and image from various motion photo formats
 # e.g. Samsung Surround Shot Video, Google MVIMG, Google Motion Photo
@@ -8,7 +8,7 @@
 #
 #
 # Author: Mark Hermann
-# Last change: 24.01.2022
+# Last change: 07.02.2024
 # 30.12.2022: Added functionality for newer Google Motion Photos
 # 01.01.2023: Changed encoder to AV1
 # 06.01.2023: Added functionality to create boomerang videos that can be looped
@@ -16,6 +16,11 @@
 #             Changed FPS mode of ffmpeg to passthrough as auto sometimes created 120fps videos even if the original's VFR was only like 25.40
 # 24.01.2023: Added maxrate to the encoder as it doesn't make sense to create videos larger than the original. I usually want to save space with a more poewerful encoder / settings
 # 10.08.2023: Added option to only remove the video without encoding anything
+# 04.01.2024: Added tune=0 to SVTAV1_PARAMS
+# 07.02.2024: Fixed a bug that EXIF infos were not copied over to the normal forward video file
+# 02.03.2024: - Added Make and Model to $tagsToCopy
+#             - Added ImageDescription=FileType to Exif information
+# 22.05.2024: - fifo filter has been removed by ffmpeg, so boomerang video generation has been updated
 #
 ###################################################################
 
@@ -27,6 +32,8 @@ $minimumSavedSpaceMultiplier = 1-($minimumSavedSpaceInPercent/100)
 $tempPath = "$($env:TEMP)\$($MyInvocation.MyCommand.Name)"
 $tagsToCopy = @("-CreateDate",         # Which tags should be copied from source JPG to video file
                 "-DateTimeOriginal",
+                "-Make",
+                "-Model",
                 "-TrackCreateDate",
                 "-MediaCreateDate",
                 "-GPSCoordinates",
@@ -37,7 +44,7 @@ $exifToolPath = "$PSScriptRoot\exiftool.exe"
 $ffmpegPath   = ("$PSScriptRoot\..\FFmpeg & Skripte\FFQueue_1_7_58\ffmpeg.exe" | Resolve-Path).Path
 $ffprobePath   = ("$PSScriptRoot\..\FFmpeg & Skripte\FFQueue_1_7_58\ffprobe.exe" | Resolve-Path).Path
 $ffmpegBoomerang   = @("-filter_complex",
-                     """[0:v:0]reverse,fifo[r];[0:v:0][r] concat=n=2:v=1 [v]""",
+                     """[0:v:0]reverse[r];[0:v:0][r] concat=n=2:v=1 [v]""",
                      "-map",
                      """[v]""")
 $ffmpegNoBoomerang = @("-map", "0:v:0")
@@ -68,7 +75,8 @@ function Run-Command ([String]$commandName, $argumentList, [String]$stdOutPath="
         New-Variable -Name process -Value $null -Scope Global -Force
         $global:process = Start-Process -FilePath "$commandName" `
                                  -ArgumentList $argumentList `
-                                 -Wait:$wait `                                 -PassThru `
+                                 -Wait:$wait `
+                                 -PassThru `
                                  -RedirectStandardError $tempPath\exifPS-StdErr.txt `
                                  -RedirectStandardOutput $stdOutPath `
                                  -ErrorAction Stop `
@@ -263,7 +271,7 @@ foreach ($file in $files)
                                             "-pix_fmt",
                                             "yuv420p10le",
                                             "-svtav1-params",
-                                            "input-depth=10:keyint=10s",
+                                            "input-depth=10:tune=0:keyint=10s",
                                             "-maxrate:v",
                                             "$([math]::Round($sourceBitrate*$minimumSavedSpaceMultiplier))"
                                             ) + $ffmpegBoomerang `
@@ -414,6 +422,23 @@ foreach ($file in $files)
         # Copy EXIF tags over
         if ($createVideos)
             {
+                Write-Host "   Copying EXIF tags from source to normal target video file: " -NoNewline
+                $argumentList = @("-TagsFromFile",
+                                  """$($fileObject.FullName)""",
+                                  "-charset",
+                                  "filename=latin1",
+                                  "-overwrite_original"
+                                  "-api",
+                                  "QuickTimeUTC",
+                                  "-ImageDescription=$$(file.Type)"
+                                  )
+                $argumentList += $tagsToCopy
+                $argumentList += @("""$videoFilePath""")
+        
+                Run-Command -commandName $exifToolPath `
+                            -argumentList $argumentList `
+                            -wait
+
                 if ($createBoomerang)
                     {
                         $videoFilePath = "$($fileObject.DirectoryName)\$($fileObject.BaseName).$($file.Type)-Boomerang.mp4"
@@ -424,7 +449,8 @@ foreach ($file in $files)
                                           "filename=latin1",
                                           "-overwrite_original"
                                           "-api",
-                                          "QuickTimeUTC"
+                                          "QuickTimeUTC",
+                                          "-ImageDescription=$$(file.Type)"
                                           )
                         $argumentList += $tagsToCopy
                         $argumentList += @("""$videoFilePath""")
@@ -433,22 +459,6 @@ foreach ($file in $files)
                                     -argumentList $argumentList `
                                     -wait
                     }
-
-                Write-Host "   Copying EXIF tags from source to normal target video file: " -NoNewline
-                $argumentList = @("-TagsFromFile",
-                                  """$($fileObject.FullName)""",
-                                  "-charset",
-                                  "filename=latin1",
-                                  "-overwrite_original"
-                                  "-api",
-                                  "QuickTimeUTC"
-                                  )
-                $argumentList += $tagsToCopy
-                $argumentList += @("""$videoFilePath""")
-        
-                Run-Command -commandName $exifToolPath `
-                            -argumentList $argumentList `
-                            -wait
             }
 
         # Final JPEG verification
