@@ -1,4 +1,4 @@
-###################################################################
+﻿###################################################################
 #
 # Script to split video and image from various motion photo formats
 # e.g. Samsung Surround Shot Video, Google MVIMG, Google Motion Photo
@@ -8,7 +8,6 @@
 #
 #
 # Author: Mark Hermann
-# Last change: 07.02.2024
 # 30.12.2022: Added functionality for newer Google Motion Photos
 # 01.01.2023: Changed encoder to AV1
 # 06.01.2023: Added functionality to create boomerang videos that can be looped
@@ -21,6 +20,8 @@
 # 02.03.2024: - Added Make and Model to $tagsToCopy
 #             - Added ImageDescription=FileType to Exif information
 # 22.05.2024: - fifo filter has been removed by ffmpeg, so boomerang video generation has been updated
+# 19.02.2025: - Added "-charset filename=latin1" to the enumeration
+# 14.04.2026: - Sped up extraction of videos
 #
 ###################################################################
 
@@ -75,8 +76,7 @@ function Run-Command ([String]$commandName, $argumentList, [String]$stdOutPath="
         New-Variable -Name process -Value $null -Scope Global -Force
         $global:process = Start-Process -FilePath "$commandName" `
                                  -ArgumentList $argumentList `
-                                 -Wait:$wait `
-                                 -PassThru `
+                                 -Wait:$wait `                                 -PassThru `
                                  -RedirectStandardError $tempPath\exifPS-StdErr.txt `
                                  -RedirectStandardOutput $stdOutPath `
                                  -ErrorAction Stop `
@@ -153,7 +153,9 @@ Run-Command -commandName $exifToolPath `
                                          "-p",
                                          '"Google.MotionVideo|null|$directory\$filename"',
                                          # Common arguments
-                                         "-common_args"
+                                         "-common_args",
+                                         "-charset",
+                                         "filename=latin1",
                                          "-r",
                                          "-ext",
                                          "jpg",
@@ -216,17 +218,30 @@ foreach ($file in $files)
                 elseif ($file.Type -eq "Google.MicroVideo")
                     {
                         Write-Host "GoogleMicroVideo from offset $($file.MicroVideoOffset)" -ForegroundColor Cyan
-                        Get-Content $fileObject.FullName -Raw -Encoding Byte | % { $_[($_.Length-$($file.MicroVideoOffset)) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
+                        #Slow: Get-Content $fileObject.FullName -Raw -Encoding Byte | % { $_[($_.Length-$($file.MicroVideoOffset)) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
+                        $fs = [System.IO.File]::OpenRead($fileObject.FullName)
+                        $bytes = New-Object byte[] $fs.Length
+                        $fs.Read($bytes, $fs.Length-$file.MicroVideoOffset, $fs.Length-1)
+                        $fs.Close()
+                        [System.IO.File]::WriteAllBytes($videoTempFilePath, $bytes)
                     }
                 elseif ($file.Type -eq "Google.MotionVideo")
                     {
                         $videoTempFilePath
                         $searchBytes = @([byte]0x00,0x00,0x00,0x1C,0X66,0x74,0x79,0x70,0x69,0x73,0x6F,0x6D) # [...]ftypisom
-                        $fileBytes = Get-Content $fileObject.FullName -Raw -Encoding Byte
+                        <#Slow:$fileBytes = Get-Content $fileObject.FullName -Raw -Encoding Byte
                         $googleMotionPhotoOffset = Find-Bytes -Bytes $fileBytes -Search $searchBytes
                         Write-Host "Extracting Google.MotionVideo from offset $googleMotionPhotoOffset" -ForegroundColor Cyan -NoNewline
                         #$fileBytes | % { $_[($_.Length-$googleMotionPhotoOffset) ..($_.Length-1)] } | Set-Content $videoTempFilePath -Encoding Byte
-                        $fileBytes[$googleMotionPhotoOffset ..($fileBytes.Length-1)] | Set-Content $videoTempFilePath -Encoding Byte
+                        $fileBytes[$googleMotionPhotoOffset ..($fileBytes.Length-1)] | Set-Content $videoTempFilePath -Encoding Byte#>
+                        $fs = [System.IO.File]::OpenRead($fileObject.FullName)
+                        $bytes = New-Object byte[] $fs.Length
+                        $fs.Read($bytes, 0, $fs.Length)
+                        $fs.Close()
+                        $googleMotionPhotoOffset = Find-Bytes -Bytes $bytes -Search $searchBytes
+                        if (-Not $googleMotionPhotoOffset) { Write-Host "No Google.MotionVideo offset found" -ForegroundColor Red; Read-Host }
+                        Write-Host "Extracting Google.MotionVideo from offset $googleMotionPhotoOffset" -ForegroundColor Cyan -NoNewline
+                        [System.IO.File]::WriteAllBytes($videoTempFilePath, $bytes[$googleMotionPhotoOffset ..($bytes.Length-1)])
                         Write-Host " done"
                     }
 
